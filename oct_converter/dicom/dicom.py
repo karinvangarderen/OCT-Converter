@@ -319,6 +319,120 @@ def _photography_sop_uid(bits: int) -> UID:
     return OphthalmicPhotography16BitImageStorage
 
 
+_FUNDUS_FLAVORS = frozenset(
+    {
+        "INFRARED",
+        "AUTOFLUORESCENCE",
+        "FA",
+        "ICG",
+        "ICGA",
+        "COLOR",
+        "REDFREE",
+        "RED FREE",
+        "BLUE",
+    }
+)
+
+# OP ImageType Value 4 (PS3.3 C.8.17.2.1.4): acquisition test / color channel.
+_OP_ACQUISITION_TESTS = frozenset(
+    {"COLOR", "REDFREE", "RED", "BLUE", "GREEN", "FA", "ICG"}
+)
+
+_FLAVOR_ALIASES = {
+    "OCT": "OCT",
+    "IR": "INFRARED",
+    "INFRARED": "INFRARED",
+    "INFRA RED": "INFRARED",
+    "AF": "AUTOFLUORESCENCE",
+    "FAF": "AUTOFLUORESCENCE",
+    "AUTOFLUORESCENCE": "AUTOFLUORESCENCE",
+    "BLUEPEAK": "AUTOFLUORESCENCE",
+    "BLUE PEAK": "AUTOFLUORESCENCE",
+    "FA": "FA",
+    "ICG": "ICG",
+    "ICGA": "ICG",
+    "COLOR": "COLOR",
+    "COLOUR": "COLOR",
+    "RGB": "COLOR",
+    "RED FREE": "REDFREE",
+    "REDFREE": "REDFREE",
+    "RF": "REDFREE",
+    "BR": "REDFREE",
+    "BLUE": "BLUE",
+}
+
+
+def _canonical_image_flavor(protocol: str | None) -> str | None:
+    """Map a vendor protocol string to a canonical acquisition flavor."""
+    if not protocol:
+        return None
+    key = protocol.strip().upper().replace("-", " ").replace("_", " ")
+    key = " ".join(key.split())
+    if key in _FLAVOR_ALIASES:
+        return _FLAVOR_ALIASES[key]
+    # Heidelberg long labels (e.g. "Blue Autofluorescence (488 nm)")
+    if "AUTOFLUORESCENCE" in key or "BLUEPEAK" in key or "BLUE PEAK" in key:
+        return "AUTOFLUORESCENCE"
+    if "INDOCYANINE" in key or "ICGA" in key:
+        return "ICG"
+    if "FLUORESCEIN" in key:
+        return "FA"
+    if "BLUE REFLECTANCE" in key or "RED FREE" in key or "REDFREE" in key:
+        return "REDFREE"
+    if "INFRA" in key:
+        return "INFRARED"
+    return None
+
+
+def _acquisition_flavor(protocol: str | None, default: str | None) -> str | None:
+    """Choose ImageType flavor from protocol, falling back to the writer default.
+
+    Protocol is ignored when it conflicts with the SOP being written (e.g. FDA
+    reuses OCT series metadata for a fundus instance).
+    """
+    mapped = _canonical_image_flavor(protocol)
+    if mapped is None:
+        return default
+    if default == "OCT" and mapped in _FUNDUS_FLAVORS:
+        return "OCT"
+    if default != "OCT" and mapped == "OCT":
+        return default
+    return mapped
+
+
+def _image_type_values(flavor: str | None, *, photography: bool) -> list[str]:
+    """ORIGINAL/PRIMARY ImageType, with OP acquisition test in Value 4."""
+    if not flavor:
+        return ["ORIGINAL", "PRIMARY"]
+    if photography and flavor in _OP_ACQUISITION_TESTS:
+        # Value 3 is empty unless DERIVED/MONTAGE (C.8.17.2.1.4).
+        return ["ORIGINAL", "PRIMARY", "", flavor]
+    return ["ORIGINAL", "PRIMARY", flavor]
+
+
+def _apply_image_type(
+    ds: Dataset,
+    protocol: str | None,
+    default: str | None,
+    *,
+    photography: bool = False,
+) -> None:
+    """Set ORIGINAL/PRIMARY ImageType and fill ProtocolName when empty.
+
+    If ``protocol`` conflicts with the writer SOP, ProtocolName is replaced
+    with the writer flavor so a reused OCT series does not label fundus as OCT.
+    """
+    flavor = _acquisition_flavor(protocol, default)
+    ds.ImageType = _image_type_values(flavor, photography=photography)
+    if not flavor:
+        return
+    mapped = _canonical_image_flavor(protocol)
+    if not getattr(ds, "ProtocolName", None):
+        ds.ProtocolName = flavor
+    elif mapped is not None and mapped != flavor:
+        ds.ProtocolName = flavor
+
+
 def write_opt_dicom(
     meta: DicomMetadata,
     frames: t.List[np.ndarray],
@@ -362,7 +476,7 @@ def write_opt_dicom(
     ds.FrameOfReferenceUID = frame_of_reference_uid or generate_uid()
 
     # OPT Image Module PS3.3 C.8.17.7
-    ds.ImageType = ["DERIVED", "SECONDARY"]
+    _apply_image_type(ds, meta.series_info.protocol, default="OCT")
     ds.AcquisitionDateTime = format_acquisition_datetime(
         meta.series_info.acquisition_date
     )
@@ -759,15 +873,10 @@ def write_fundus_dicom(
     ds.PixelSpacing = meta.image_geometry.pixel_spacing
     ds.ImageOrientationPatient = meta.image_geometry.image_orientation
 
-    # OPT Image Module PS3.3 C.8.17.7
-    ds.ImageType = ["DERIVED", "SECONDARY"]
-    enface_to_type = {
-        "IR": "RED",
-        "FA": "BLUE",
-        "ICGA": "GREEN",
-    }
-    if ds.ProtocolName in enface_to_type:
-        ds.ImageType.append(enface_to_type.get(ds.ProtocolName))
+    # Ophthalmic Photography Image Module PS3.3 C.8.17.2
+    _apply_image_type(
+        ds, meta.series_info.protocol, default=None, photography=True
+    )
     ds.AcquisitionDateTime = format_acquisition_datetime(
         meta.series_info.acquisition_date
     )
@@ -826,15 +935,10 @@ def write_color_fundus_dicom(
     ds.PixelSpacing = meta.image_geometry.pixel_spacing
     ds.ImageOrientationPatient = meta.image_geometry.image_orientation
 
-    # OPT Image Module PS3.3 C.8.17.7
-    ds.ImageType = ["DERIVED", "SECONDARY"]
-    enface_to_type = {
-        "IR": "RED",
-        "FA": "BLUE",
-        "ICGA": "GREEN",
-    }
-    if ds.ProtocolName in enface_to_type:
-        ds.ImageType.append(enface_to_type.get(ds.ProtocolName))
+    # Ophthalmic Photography Image Module PS3.3 C.8.17.2
+    _apply_image_type(
+        ds, meta.series_info.protocol, default="COLOR", photography=True
+    )
     ds.AcquisitionDateTime = format_acquisition_datetime(
         meta.series_info.acquisition_date
     )

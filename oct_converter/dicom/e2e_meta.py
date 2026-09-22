@@ -15,6 +15,15 @@ from oct_converter.dicom.metadata import (
 from oct_converter.image_types import FundusImageWithMetaData, OCTVolumeWithMetaData
 
 
+def _series_meta_value(mapping: dict | None, image_id: str | None):
+    """Look up per-series E2E metadata, ignoring scan-repeat trailing underscores."""
+    if not mapping or not image_id:
+        return None
+    if image_id in mapping:
+        return mapping[image_id]
+    return mapping.get(image_id.rstrip("_"))
+
+
 def e2e_patient_meta(meta: dict) -> PatientMeta:
     """Creates PatientMeta from e2e info stored in raw metadata
 
@@ -60,16 +69,21 @@ def e2e_series_meta(id, laterality, acquisition_date, metadata) -> SeriesMeta:
     series.laterality = laterality
     series.acquisition_date = acquisition_date
     series.opt_anatomy = OPTAnatomyStructure.Retina
-    if metadata.get("examined_structure", {}).get(id):
-        structure = metadata["examined_structure"][id]
-        try:
-            series.opt_anatomy = getattr(OPTAnatomyStructure, structure)
-        except AttributeError:
-            series.opt_anatomy = OPTAnatomyStructure.Unspecified
-    if metadata.get("enface_modality", {}).get(id):
-        series.protocol = metadata["enface_modality"][id]
-    if metadata.get("scan_pattern", {}).get(id):
-        series.description = metadata["scan_pattern"][id]
+    if metadata.get("examined_structure"):
+        structure = _series_meta_value(metadata["examined_structure"], id)
+        if structure:
+            try:
+                series.opt_anatomy = getattr(OPTAnatomyStructure, structure)
+            except AttributeError:
+                series.opt_anatomy = OPTAnatomyStructure.Unspecified
+    protocol = _series_meta_value(
+        metadata.get("enface_modality"), id
+    ) or _series_meta_value(metadata.get("oct_modality"), id)
+    if protocol:
+        series.protocol = protocol
+    description = _series_meta_value(metadata.get("scan_pattern"), id)
+    if description:
+        series.description = description
 
     return series
 

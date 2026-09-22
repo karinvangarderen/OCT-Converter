@@ -674,7 +674,7 @@ class E2E(object):
             Skip those instead of indexing ``text[0]``.
             """
             text = getattr(parsed, "text", None) or []
-            if key not in dest and index < len(text):
+            if key not in dest and index < len(text) and text[index]:
                 dest[key] = text[index]
 
         metadata = dict()
@@ -795,6 +795,9 @@ class E2E(object):
                     enface = e2e_binary.enface_modality.parse(raw)
                     _set_utf16_text(
                         metadata["enface_modality"], image_string, enface, index=1
+                    )
+                    _set_utf16_text(
+                        metadata["enface_modality"], image_string, enface, index=0
                     )
 
                 elif chunk.type == 9008:
